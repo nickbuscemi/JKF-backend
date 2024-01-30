@@ -50,11 +50,17 @@ const transporter = nodemailer.createTransport({
 });
 
 
+app.use((req, res, next) => {
+  if (req.headers['x-forwarded-proto'] !== 'https' && process.env.NODE_ENV === 'production') {
+    return res.redirect(`https://${req.headers.host}${req.url}`);
+  }
+  next();
+}); 
 
 app.use(express.static(process.env.STATIC_DIR));
 app.use(express.json());
 app.use(cors({
-  origin: 'http://localhost:3000'
+  origin: process.env.NODE_ENV === 'production' ? 'https://your-production-site.com' : 'http://localhost:3000',
 }));
 
 
