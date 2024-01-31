@@ -35,7 +35,7 @@ async function connectToMongoDB() {
 // database collections
 const contactFormData = client.db("_joekilleenfoundationDB").collection("_contactformdata");
 const newsletterParticipants = client.db("_joekilleenfoundationDB").collection("_newsletterparticipants");
-const eventSignUpData = client.db("_joekilleenfoundationDB").collection("_eventsignupdata");
+const marathoninquiries = client.db("_joekilleenfoundationDB").collection("_marathoninquiries");
 
 // nodemailer config
 const transporter = nodemailer.createTransport({
@@ -185,6 +185,63 @@ app.post('/newsletter-subscribe', async (req, res) => {
     res.status(500).send('Error processing your request');
   }
 });
+
+// post marathon inquiry form 
+app.post('/submit-marathon-form', async (req, res) => {
+  const { 
+      firstName, 
+      lastName, 
+      phoneNumber, 
+      email, 
+      fundraisingGoal, 
+      marathonReason, 
+      additionalNames 
+  } = req.body;
+
+  try {
+      // Email to the client
+      const clientMailOptions = {
+          from: process.env.GMAIL_USER,
+          to: email,
+          subject: 'Marathon Registration Confirmation',
+          text: `Hello ${firstName},\n\nThank you for your interest in our marathon. We have received your registration details.\n\nFundraising Goal Agreed: $3,500\n\nBest Regards,\nThe Joe Killeen Memorial Foundation.`
+      };
+
+      // Email to the admin
+      const adminMailOptions = {
+          from: email,
+          to: process.env.GMAIL_USER,
+          subject: 'New Marathon Registration',
+          text: `New marathon registration received:\n\nName: ${firstName} ${lastName}\nEmail: ${email}\nPhone: ${phoneNumber}\n\nFundraising Goal Agreed: ${fundraisingGoal ? 'Yes' : 'No'}\nMarathon Reason: ${marathonReason}\nAdditional Names: ${additionalNames}`
+      };
+
+      // Send emails
+      transporter.sendMail(clientMailOptions, function(error, info) {
+        if (error) {
+          console.error('Error sending email to client:', error);
+        } else {
+          console.log('Confirmation email sent to client: ' + info.response);
+        }
+      });
+
+      transporter.sendMail(adminMailOptions, function(error, info) {
+        if (error) {
+          console.error('Error sending email to admin:', error);
+        } else {
+          console.log('Email sent to admin: ' + info.response);
+        }
+      });
+
+      // Database Logic
+      await marathoninquiries.insertOne({ firstName, lastName, phoneNumber, email, fundraisingGoal, marathonReason, additionalNames })
+
+      res.status(200).send('Marathon registration emails sent and data processed successfully');
+  } catch (error) {
+      console.error('Error processing marathon registration:', error);
+      res.status(500).send('Error processing your marathon registration');
+  }
+});
+
 
 
 
