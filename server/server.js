@@ -36,6 +36,8 @@ async function connectToMongoDB() {
 const contactFormData = client.db("_joekilleenfoundationDB").collection("_contactformdata");
 const newsletterParticipants = client.db("_joekilleenfoundationDB").collection("_newsletterparticipants");
 const marathoninquiries = client.db("_joekilleenfoundationDB").collection("_marathoninquiries");
+const golfParticipants = client.db("_JKFgolfTournamentDB").collection("_participants");
+const golfTeams = client.db("_JKFgolfTournamentDB").collection("_teams");
 
 // nodemailer config
 const transporter = nodemailer.createTransport({
@@ -48,6 +50,34 @@ const transporter = nodemailer.createTransport({
       pass: process.env.GMAIL_APP_PASS // Your app password
   }
 });
+
+// golf payment links function
+// Function to send out payment links based on payment type (team or individual)
+function sendPaymentLink(email, type) {
+  let paymentLink = "";
+  const subject = "Complete Your Golf Tournament Registration Payment";
+
+  if (type === "team") {
+    paymentLink = "https://book.stripe.com/test_eVa03g7WHdno7V6fZ2"; // Team payment link
+  } else if (type === "individual") {
+    paymentLink = "https://book.stripe.com/test_aEUg2e3Gr6Z08Za28b"; // Individual payment link
+  }
+
+  const text = `Please complete your payment using the following link: ${paymentLink}`;
+
+  transporter.sendMail({
+    from: process.env.GMAIL_USER,
+    to: email,
+    subject,
+    text,
+  }, (error, info) => {
+    if (error) {
+      console.error('Error sending payment link email:', error);
+    } else {
+      console.log('Payment link email sent: ' + info.response);
+    }
+  });
+}
 
 
 app.use((req, res, next) => {
@@ -203,7 +233,7 @@ app.post('/submit-marathon-form', async (req, res) => {
       const clientMailOptions = {
           from: process.env.GMAIL_USER,
           to: email,
-          subject: 'Marathon Registration Confirmation',
+          subject: 'Marathon Inquiry Confirmation',
           text: `Hello ${firstName},\n\nThank you for your interest in our marathon. We have received your registration details.\n\nFundraising Goal Agreed: $3,500\n\nBest Regards,\nThe Joe Killeen Memorial Foundation.`
       };
 
@@ -211,8 +241,8 @@ app.post('/submit-marathon-form', async (req, res) => {
       const adminMailOptions = {
           from: email,
           to: process.env.GMAIL_USER,
-          subject: 'New Marathon Registration',
-          text: `New marathon registration received:\n\nName: ${firstName} ${lastName}\nEmail: ${email}\nPhone: ${phoneNumber}\n\nFundraising Goal Agreed: ${fundraisingGoal ? 'Yes' : 'No'}\nMarathon Reason: ${marathonReason}\nAdditional Names: ${additionalNames}`
+          subject: 'New Marathon Inquiry',
+          text: `New marathon Inquiry received:\n\nName: ${firstName} ${lastName}\nEmail: ${email}\nPhone: ${phoneNumber}\n\nFundraising Goal Agreed: ${fundraisingGoal ? 'Yes' : 'No'}\nMarathon Reason: ${marathonReason}\nAdditional Names: ${additionalNames}`
       };
 
       // Send emails
@@ -245,6 +275,85 @@ app.post('/submit-marathon-form', async (req, res) => {
 
 
 
+// post golf team registration
+app.post('/submit-golf-4some-form', async (req, res) => {
+  const { leaderFirstName, leaderLastName, leaderPhoneNumber, leaderEmail, teamName, teammates, paymentOption, initialPayment = 0 } = req.body;
+
+  const TEAM_REGISTRATION_FEE = 400;
+  let balanceRemaining = TEAM_REGISTRATION_FEE - initialPayment;
+  let teamIsPaid = initialPayment >= TEAM_REGISTRATION_FEE;
+
+  try {
+    // Insert the team into the database with initial details
+    const teamResult = await golfTeams.insertOne({
+      leaderFirstName,
+      leaderLastName,
+      leaderPhoneNumber,
+      leaderEmail,
+      teamName,
+      balanceRemaining,
+      paymentOption,
+      teamIsPaid,
+      teammates: teammates.map(teammate => ({
+        ...teammate,
+        isPaid: false // Initially, teammates haven't paid individually
+      }))
+    });
+
+    const teamId = teamResult.insertedId;
+
+    // Insert each teammate into the participants collection with teamId
+    const participantInsertions = teammates.map(teammate =>
+     golfParticipants.insertOne({
+        ...teammate,
+        teamId: teamId,
+        teamName: teamName,
+        isLeader: false
+      })
+    );
+
+    // Optionally, include the team leader as a participant
+    participantInsertions.push(
+      golfParticipants.insertOne({
+        firstName: leaderFirstName,
+        lastName: leaderLastName,
+        phoneNumber: leaderPhoneNumber,
+        email: leaderEmail,
+        teamId: teamId,
+        teamName: teamName,
+        isPaid: false,
+        isLeader: true // Distinguishing the team leader
+      })
+    );
+
+    // Await all insertions to complete
+    await Promise.all(participantInsertions);
+
+    if (paymentOption === 'individual') {
+      // If not paid in full, send individual payment links
+      teammates.forEach(teammate => {
+        sendPaymentLink(teammate.email, "individual");
+      });
+      // Optionally, include the team leader in the individual payment process
+      sendPaymentLink(leaderEmail, "individual");
+    } else {
+      sendPaymentLink(leaderEmail, "team")
+    }
+
+    res.status(200).json({ message: "Team registered successfully", teamId: teamId, balanceRemaining });
+  } catch (error) {
+    console.error('Error processing form submission:', error);
+    res.status(500).json({ error: "Error processing your request" });
+  }
+});
+
+
+
+
+
+
+
+
 app.get('/', (req, res) => {
   const path = resolve(process.env.STATIC_DIR + '/index.html');
   res.sendFile(path);
@@ -257,5 +366,6 @@ connectToMongoDB()
     app.listen(4242, () => console.log(`Node server listening at http://localhost:4242`));
   })
   .catch(console.dir);
+
 
 
