@@ -3,13 +3,18 @@ const cors = require('cors');
 const {resolve} = require('path');
 //const env = require('dotenv').config({path: './.env'});
 require('dotenv').config();
+
+// stripe api secret key and endpoint secret
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+const endpointSecret = process.env.STRIPE_ENDPOINT_SECRET;
+
 const { MongoClient, ServerApiVersion } = require('mongodb');
 const nodemailer = require('nodemailer');
-const Stripe = require('stripe');
+const stripe = require('stripe')(stripeSecretKey);
 const app = express();
 
-// stripe api secret key
-const stripeSecretKey = process.env.STRIPE_SECRET_KEY
+
+
 // MongoDB URI and CLIENT setup
 const uri = `mongodb+srv://killeen:${process.env.MONGO_DB_PASS}@joekilleenfoundation.xna8oil.mongodb.net/?retryWrites=true&w=majority`;
 
@@ -54,13 +59,17 @@ const transporter = nodemailer.createTransport({
 // golf payment links function
 // Function to send out payment links based on payment type (team or individual)
 function sendPaymentLink(email, type) {
+
+  // url encode email
+  const encodedEmail = encodeURIComponent(email);
+
   let paymentLink = "";
   const subject = "Complete Your Golf Tournament Registration Payment";
 
   if (type === "team") {
-    paymentLink = "https://book.stripe.com/test_eVa03g7WHdno7V6fZ2"; // Team payment link
+    paymentLink = `https://book.stripe.com/test_eVa03g7WHdno7V6fZ2?prefilled_email=${encodedEmail}`; // Team payment link
   } else if (type === "individual") {
-    paymentLink = "https://book.stripe.com/test_aEUg2e3Gr6Z08Za28b"; // Individual payment link
+    paymentLink = `https://book.stripe.com/test_aEUg2e3Gr6Z08Za28b?prefilled_email=${encodedEmail}`; // Individual payment link
   }
 
   const text = `Please complete your payment using the following link: ${paymentLink}`;
@@ -88,6 +97,7 @@ app.use((req, res, next) => {
 }); 
 
 app.use(express.static(process.env.STATIC_DIR));
+app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' ? 'https://your-production-site.com' : 'http://localhost:3000',
@@ -294,6 +304,7 @@ app.post('/submit-golf-4some-form', async (req, res) => {
       balanceRemaining,
       paymentOption,
       teamIsPaid,
+      leaderisPaid: false,
       teammates: teammates.map(teammate => ({
         ...teammate,
         isPaid: false // Initially, teammates haven't paid individually
@@ -308,7 +319,8 @@ app.post('/submit-golf-4some-form', async (req, res) => {
         ...teammate,
         teamId: teamId,
         teamName: teamName,
-        isLeader: false
+        isLeader: false,
+        isPaid: false
       })
     );
 
@@ -347,6 +359,94 @@ app.post('/submit-golf-4some-form', async (req, res) => {
   }
 });
 
+// stripe webhook that awaits payment from either indivduals or team leader pay in full
+app.post('/webhook', express.raw({type: 'application/json'}), async (request, response) => {
+  const sig = request.headers['stripe-signature'];
+
+  let event;
+
+  try {
+      event = stripe.webhooks.constructEvent(request.body, sig, endpointSecret);
+  } catch (err) {
+      console.error(`Webhook Error: ${err.message}`);
+      return response.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+      switch (event.type) {
+          case 'checkout.session.completed':
+              const session = event.data.object; // The checkout session object
+              await handlePaymentSuccess(session);
+              break;
+          // ... handle other event types
+          default:
+              console.log(`Unhandled event type ${event.type}`);
+      }
+  } catch (err) {
+      console.error(`Error handling event: ${err}`);
+      return response.status(500).send(`Internal server error`);
+  }       
+
+  // Return a 200 response to acknowledge receipt of the event
+  response.json({received: true});
+});
+
+
+  const handlePaymentSuccess = async (session) => {
+  const email = session.customer_details.email;
+  const amountReceived = session.amount_total; // The total amount from the session
+
+  const TEAM_REGISTRATION_FEE = 40000; // Assuming $400, represented in cents
+  let updateResult;
+
+  // Check if this is a full team payment
+  if (amountReceived === TEAM_REGISTRATION_FEE) {
+    updateResult = await golfTeams.updateOne(
+      { leaderEmail: email },
+      {
+        $set: {
+          leaderisPaid: true,
+          teamIsPaid: true, // Assuming full payment covers the team
+          balanceRemaining: 0,
+          "teammates.$[].isPaid": true // Mark all teammates as paid
+        }
+      }
+    );
+  } else {
+    // Find the team by leader or teammate email
+    const team = await golfTeams.findOne({ $or: [{ leaderEmail: email }, { "teammates.email": email }] });
+
+    if (team) {
+      let isLeader = team.leaderEmail === email;
+
+      if (isLeader) {
+        // Update if the leader is making an individual payment
+        updateResult = await golfTeams.updateOne(
+          { leaderEmail: email },
+          { $set: { leaderisPaid: true }, $inc: { balanceRemaining: -100 } }
+        );
+      } else {
+        // Update the specific teammate's payment status
+        // This assumes the array element to be updated is correctly identified by the email in the query
+        updateResult = await golfTeams.updateOne(
+          { _id: team._id, "teammates.email": email },
+          { $set: { "teammates.$.isPaid": true }, $inc: { balanceRemaining: -100 } }
+        );
+      }
+
+      // Check if the balance update should trigger teamIsPaid status change
+      if (updateResult.modifiedCount > 0) {
+        const updatedTeam = await golfTeams.findOne({ _id: team._id });
+        if (updatedTeam && updatedTeam.balanceRemaining <= 0) {
+          await golfTeams.updateOne(
+            { _id: team._id },
+            { $set: { teamIsPaid: true } }
+          );
+        }
+      }
+    }
+  }
+};
 
 
 
@@ -366,6 +466,5 @@ connectToMongoDB()
     app.listen(4242, () => console.log(`Node server listening at http://localhost:4242`));
   })
   .catch(console.dir);
-
 
 
